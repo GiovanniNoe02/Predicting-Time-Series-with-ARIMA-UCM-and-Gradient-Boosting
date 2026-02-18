@@ -1,0 +1,1007 @@
+---
+title: "TSA_Project"
+author: "Giovanni Noè"
+output: pdf_document
+date: "2026-01-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+Sys.setlocale("LC_TIME", "en_US")
+```
+
+# Loading and Exploration
+
+## Data Loading, Cleaning and Initial Exploration
+
+Loading...
+
+```{r}
+dt <- read.csv("student_dataset.csv")
+head(dt)
+tail(dt)
+dt[duplicated(dt$time), ]
+```
+
+Cleaning...
+
+```{r}
+dt$date <- as.Date(substr(dt$time, 1, 10))
+dt$hour <- as.integer(substr(dt$time, 12, 13))
+
+dt <- dt[,c('date', 'hour', 'value')]
+
+head(dt)
+tail(dt)
+summary(dt)
+```
+
+One day has all zero values...
+
+```{r}
+length(dt$date[dt$value == 0 & dt$date == as.Date("2017-09-15")])
+dt[dt$date==as.Date("2017-09-15"),"value"] <-
+  floor((dt[dt$date==as.Date("2017-09-14"),"value"] 
+         + dt[dt$date==as.Date("2017-09-16"),"value"])/2)
+```
+
+Splitting known and unknown data...
+
+```{r}
+dt_to_predict <- dt[is.na(dt$value),]
+dt <- dt[!is.na(dt$value),]
+
+dt_to_predict[nrow(dt_to_predict) + 1,] = c(as.Date("2020-02-29"),23, NA)
+nrow(dt_to_predict)
+```
+
+Hourly Exploration...
+
+```{r}
+library(tidyverse)
+dt |>
+  pivot_wider(names_from = "hour", values_from = "value", names_prefix = "h") ->
+  dt24
+
+head(dt24)
+summary(dt24[, c(2,3,4,5,6)])
+summary(dt24[, c(7,8,9,10,11)])
+summary(dt24[, c(12,13,14,15,16)])
+summary(dt24[, c(17,18,19,20,21)])
+summary(dt24[, c(22,23,24,25)])
+```
+Adding column datetime...
+
+```{r}
+dt |>
+  mutate(datetime = ymd_h(paste(date, hour))) ->
+  dt
+
+dt_to_predict |>
+  mutate(datetime = ymd_h(paste(date, hour))) ->
+  dt_to_predict
+```
+
+Modelling Holidays...
+
+```{r}
+# data.frame with Australian holidays: name, month and day
+fixed_hdays_aus <- data.frame(
+  name = c("New Year",
+           "Australia Day",
+           "ANZAC Day",
+           "Christmas",
+           "Boxing Day"),
+  month = c(1, 1,  4, 12, 12),
+  day =   c(1, 26, 25, 25, 26)
+)
+
+# moving holidays (Easter)
+timeDate::Easter(2015:2020) |>
+  as.Date() ->
+  easter
+easter_mon <- timeDate::EasterMonday(2015:2020) |>
+  as.Date()
+
+# for each year, extract the month and the day of each holiday
+lapply(2015:2020, function(y)
+  lubridate::ymd(paste(y,
+                       fixed_hdays_aus$month,
+                       fixed_hdays_aus$day, sep = "-"))
+  ) |>
+  unlist() |>  # to turn the list into something simpler
+  as.Date() -> # to be sure the format is Date
+  hdays_aus
+
+# and now let us merge fixed holiday dates and Easter Mondays
+c(hdays_aus, easter, easter_mon) |>
+  sort() ->
+  hdays_aus
+```
+
+
+## Looking for Trend and Seasonalities
+
+Plotting Time Series...
+
+```{r}
+dt |>
+  ggplot(aes(x = date, y = value)) +
+  geom_line(color = "forestgreen")
+```
+
+Plotting mean and sd...
+
+```{r}
+dt |>
+  mutate(year_week = paste(year(dt$date), week(dt$date))) |>
+  group_by(year_week) |>
+  summarise(means = mean(value), sds = sd(value)) |>
+  ggplot(aes(x = means, y = sds)) +
+  geom_point() +
+  geom_smooth(formula = y~x, method = "lm")
+```
+
+Box-Cox plot after log transformation...
+
+```{r}
+dt |>
+  mutate(year_week = paste(year(dt$date), week(dt$date))) |>
+  group_by(year_week) |>
+  summarise(means = mean(log(1+value)), sds = sd(log(1+value))) |>
+  ggplot(aes(x = means, y = sds)) +
+  geom_point() +
+  geom_smooth(formula = y~x, method = "lm")
+```
+
+Box-Cox plot after $\lambda = 0.15$ transformation...
+
+```{r}
+lambda = 0.15
+dt |>
+  mutate(year_week = paste(year(dt$date), week(dt$date))) |>
+  group_by(year_week) |>
+  summarise(means = mean((value^lambda - 1) / lambda), sds = sd((value^lambda - 1) / lambda)) |>
+  ggplot(aes(x = means, y = sds)) +
+  geom_point() +
+  geom_smooth(formula = y~x, method = "lm")
+```
+
+Plotting Daily Time Series...
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+dt[,c('date','value')] |>
+  mutate(
+    day_of_the_year = yday(date)
+  ) |>
+  group_by(date) |>
+  summarise(mean_value = mean(value)) |>
+  ungroup() |>
+  ggplot(aes(x = date,
+             y = mean_value)) +
+  geom_line(color = "forestgreen") +
+  labs(
+    x = "Date",
+    y = "Mean Value",
+    title = "Daily Time Series"
+  ) +
+  theme_minimal()
+```
+
+Plotting TS for each Year...
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+dt[,c('date','value')] |>
+  mutate(
+    year = year(date),
+    day_of_the_year = yday(date)
+  ) |>
+  group_by(year, day_of_the_year) |>
+  summarise(mean_value = mean(value)) |>
+  ungroup() |>
+  ggplot(aes(x = day_of_the_year, 
+           y = mean_value, 
+           color = factor(year), 
+           group = year)) +
+  geom_line() +
+  scale_x_continuous(
+    breaks = c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335),
+    labels = month.abb
+  ) +
+  labs(x = "Day of the Year", y = "Mean Value", color = "Year") +
+  theme_minimal()
+```
+
+Plotting Hourly TS for a Random Week (From Monday to Sunday)...
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+dt |>
+  filter(date %in% as.Date(c("2017-05-15", "2017-05-16", "2017-05-17", 
+                             "2017-05-18", "2017-05-19", 
+                             "2017-05-20", "2017-05-21" ))) |>
+  ggplot(aes(x = hour, 
+           y = (value^lambda - 1) / lambda, 
+           colour = factor(date), 
+           group = date)) +
+  geom_line(size = 1) +
+  scale_x_continuous(breaks = 0:23) +
+  labs(
+    x = "Hour",
+    y = "Value",
+    color = "Day",
+    title = "Hourly time series for some days"
+  ) +
+  theme_minimal()
+```
+
+Plotting the Mean Hourly Value for each day of the Week...
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+wdays_data <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+            "Saturday", "Sunday")
+
+dt |>
+  mutate(
+    weekday_num = wday(date, week_start = 1)
+  ) |>
+  group_by(weekday_num, hour) |>
+  summarise(
+    mean_value = mean(value, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = hour, 
+           y = mean_value,
+           color = factor(weekday_num),
+           group = weekday_num)) +
+  geom_line(size = 1) +
+  scale_x_continuous(breaks = 0:23) +
+  scale_color_discrete(
+    name = "Day of the Week",
+    labels = wdays_data
+  ) +
+  labs(
+    x = "Hour",
+    y = "Mean Value",
+    title = "Hourly Average Value for each Day of the Week"
+  ) +
+  theme_minimal()
+```
+
+Look for daily seasonality...
+
+```{r}
+library(forecast)
+dt_tr = dt
+dt_tr$value = (dt_tr$value^lambda - 1) / lambda
+dt_tr |>
+pull(value) |>
+ggAcf(168) +
+scale_x_continuous(breaks = seq(24, 168, 24)) +
+ggtitle("ACF of levels: 168 lags")
+```
+
+Looking for weekly seasonality...
+
+```{r}
+library(forecast)
+dt_tr |>
+pull(value) |>
+diff(24) |>
+ggAcf(168*4) +
+scale_x_continuous(breaks = seq(168, 168*4, 168)) +
+ggtitle("ACF of levels: 168*4 lags")
+```
+
+Looking for tearly seasonality...
+
+```{r}
+library(forecast)
+dt_tr |>
+pull(value) |>
+diff(168) |>
+ggAcf(9000) +
+scale_x_continuous(breaks = seq(168*4, 9000, 168*4)) +
+ggtitle("ACF of levels: little more than one year")
+```
+
+Look at yearly seasonal difference...
+
+```{r}
+dt |>
+  mutate(weekday = wday(date, label = TRUE, ),
+  month = month(date, label = TRUE),
+  year = year(date)) |>
+  filter(year == 2017, weekday %in% c("Fri", "Wed"), month %in% c("Jan", "Jul")) |>
+  group_by(weekday, month, hour) |>
+  summarise(mean_value = mean(value)) |>
+  ggplot(aes(x = hour, y = mean_value, linetype = weekday, color = month)) +
+  geom_line(linewidth = 1) +
+  ggtitle("Within-day patterns in different weekdays and seasons")
+```
+
+Checking stationarity after transformations...
+
+```{r}
+lambda = 0.15
+dt |>
+  mutate(
+    value_bc = (value^lambda - 1) / lambda
+  ) |>
+  mutate(
+    value_diff = c(NA, diff(value_bc))
+  ) |>
+  ggplot(aes(x = date, y = value_diff)) +
+  geom_line(color = "forestgreen") +
+  labs(
+    title = "TS after Box-Cox (λ = 0.15) and Differentiation",
+    y = "TS",
+    x = "Date"
+  )
+
+```
+
+
+# ARIMA Model
+
+Modelling yearly seasonality...
+
+```{r}
+k = 15
+# daily data
+fr24 <- outer(1:nrow(dt24), 1:k)*2*pi/365.25
+co24 <- cos(fr24)
+si24 <- sin(fr24)
+colnames(co24) <- paste0("cos", 1:ncol(co24))
+colnames(si24) <- paste0("sin", 1:ncol(si24))
+X24 <- cbind(co24, si24)
+```
+
+Modelling holidays and handling Fridays and Saturdays with dummies...
+
+```{r}
+X24 <- cbind(X24, holiday = dt24$date %in% hdays_aus)
+```
+
+Defining Box-Cox transformation...
+
+```{r}
+transf <- function(x) {
+    result <- (x^lambda - 1) / lambda
+    return(result)
+}
+```
+
+Looking at ACF and PACF for peak hour...
+
+```{r}
+dt24 |>
+  pull(h16) |>
+  transf() |>
+  diff(7) |>
+  ggAcf(42) +
+  scale_x_continuous(breaks = seq(7, 42, 7), minor_breaks = seq(1, 42))
+
+dt24 |>
+  pull(h16) |>
+  log() |>
+  diff(7) |>
+  ggPacf(42) +
+  scale_x_continuous(breaks = seq(7, 42, 7), minor_breaks = seq(1, 42))
+```
+
+Building ARIMA model for peak hour...
+
+```{r}
+mod24_1 <- Arima(
+  y = head(dt24$h16, -30),
+  order = c(1, 1, 3),
+  seasonal = list(order = c(0, 1, 1), period = 7),
+  include.constant = TRUE,
+  xreg = head(X24, -30),
+  lambda = 0.15,
+  method = "CSS"
+)
+
+mod24_1 |>
+  broom::tidy() |>
+  mutate(t.ratio = estimate/std.error,
+         p.value = 2*pnorm(-abs(t.ratio))) |>
+  knitr::kable(digits = 4)
+  
+mod24_1 |>
+  resid() |>
+  ggAcf(28) +
+  scale_x_continuous(breaks = seq(7, 28, 7), minor_breaks = seq(1, 28))
+
+mod24_1 |>
+  resid() |>
+  ggPacf(28) +
+  scale_x_continuous(breaks = seq(7, 28, 7), minor_breaks = seq(1, 28))
+
+```
+
+Building a model for each hour keeping out 30 observations to test...
+
+```{r}
+models <- lapply(
+  head(dt24[, -1], -30),
+    function(y) {
+      Arima(
+        y = y,
+        order = c(1, 1, 3),
+        seasonal = list(order = c(0, 1, 1), period = 7),
+        include.constant = TRUE,
+        xreg = head(X24, -30),
+        lambda = 0.15,
+        method = "CSS"
+      )
+    }
+)
+```
+
+Predicting the 30 left out observations...
+
+```{r}
+frcts <- sapply(
+  models,
+  function(mod) forecast(mod, xreg = tail(X24, 30))$mean
+)
+```
+
+Comparing true values and predictions...
+
+```{r}
+dt |>
+  tail(24*30) |>
+  mutate(forecast = as.numeric(t(frcts))) |>
+  pivot_longer(c(value, forecast), names_to = "series", values_to = "value") -> val_frcts_arima
+val_frcts_arima |>
+  ggplot(aes(x = datetime, y = value, color = series)) +
+  geom_line()
+```
+
+Computing MAE...
+
+```{r}
+mae_arima <- mean(abs(val_frcts_arima[val_frcts_arima$series == 'value', 'value'] -
+                  val_frcts_arima[val_frcts_arima$series == 'forecast', 'value'])$value)
+
+print(mae_arima)
+```
+
+Building the models on the full dataset...
+
+```{r}
+models <- lapply(
+  dt24[, -1],
+    function(y) {
+      Arima(
+        y = y,
+        order = c(1, 1, 3),
+        seasonal = list(order = c(0, 1, 1), period = 7),
+        include.constant = TRUE,
+        xreg = X24,
+        lambda = 0.15,
+        method = "CSS"
+      )
+    }
+)
+```
+
+Building dataframe to predict and predictions...
+
+```{r}
+dt_to_predict[, c("date","value", "hour")] |>
+  pivot_wider(names_from = "hour", values_from = "value", names_prefix = "h") ->
+  dt24_pred
+
+# daily data
+fr24 <- outer(1:nrow(dt24_pred), 1:k)*2*pi/365.25
+co24 <- cos(fr24)
+si24 <- sin(fr24)
+colnames(co24) <- paste0("cos", 1:ncol(co24))
+colnames(si24) <- paste0("sin", 1:ncol(si24))
+X24_pred <- cbind(co24, si24)
+
+X24_pred <- cbind(X24_pred, holiday = dt24_pred$date %in% hdays_aus)
+
+predictions <- sapply(
+  models,
+  function(mod) forecast(mod, xreg = X24_pred)$mean
+)
+```
+
+Plotting predictions...
+
+```{r}
+dt_to_predict |>
+  mutate(forecast = as.numeric(t(predictions))) |>
+  pivot_longer(c(value, forecast), names_to = "series", values_to = "value") |>
+  ggplot(aes(x = datetime, y = value, color = series)) +
+  geom_line()
+```
+
+Building the variable predictions_to_submit...
+
+```{r}
+dt_to_predict |>
+  mutate(forecast = as.numeric(t(predictions))) |>
+  pivot_longer(c(value, forecast), names_to = "series", values_to = "value") -> predictions_to_submit
+
+predictions_to_submit <- predictions_to_submit[!is.na(predictions_to_submit$value), c("datetime", "value")]
+names(predictions_to_submit) <- c("time", "ARIMA")
+```
+
+
+# UCM
+
+Modelling Holidays and summer vacations...
+
+```{r}
+library(tidyverse)
+library(KFAS)
+dt24 |>
+  mutate(holiday = as.numeric(date %in% hdays_aus),
+         summer_vacation = as.numeric(((month(date) == 12)*(day(date)>=17) | ((month(date)) == 1)*(day(date)<= 31)))) ->
+  dt24_hday
+```
+
+Testing oh hour 16...
+
+```{r}
+library(xts)
+
+y <- xts(dt24_hday$h16, as.Date(dt24_hday$date))
+plot(y)
+
+yna <- log(y+1)
+yna["2019-12-01/2019-12-31"] <- NA
+dt_h16 <- dt24_hday[, c('h16', 'holiday', 'summer_vacation')]
+dt_h16$yna <- as.numeric(yna)
+
+dt_h16 <- cbind(dt_h16, holiday_friday = (wday(dt24$date)==6)*dt_h16[, "holiday"] +
+                  (wday(dt24$date)==6)*dt_h16[, "summer_vacation"] - 
+                  (wday(dt24$date)==6)*dt_h16[, "holiday"] * (wday(dt24$date)==6)*dt_h16[, "summer_vacation"],
+                holiday_saturday = (wday(dt24$date)==7)*dt_h16[, "holiday"] +
+                  (wday(dt24$date)==7)*dt_h16[, "summer_vacation"] - 
+                  (wday(dt24$date)==7)*dt_h16[, "holiday"] * (wday(dt24$date)==7)*dt_h16[, "summer_vacation"])
+names(dt_h16) <- c('h16', 'holiday', 'summer_vacation', 'yna', 'holiday_friday', 'holiday_saturday')
+```
+
+Model on h16...
+
+```{r}
+mod <- SSModel(
+  yna ~ holiday + summer_vacation + holiday_friday + holiday_saturday +
+    SSMtrend(1, NA) +
+    SSMseasonal(7, NA, "dummy") +
+    SSMseasonal(365, NA, "trig", harmonics = 1:15),
+  H = NA,
+  data = dt_h16
+)
+```
+
+Setting variances...
+
+```{r}
+mod$a1["level", 1] <- mean(yna, na.rm = TRUE)
+vy <- var(yna, na.rm = TRUE)
+diag(mod$P1) <- vy
+diag(mod$P1inf) <- 0
+```
+
+Defining update function...
+
+```{r}
+updt <- function(pars, model) {
+  model$Q[1, 1, 1] <- exp(pars[1]) # level disturbace variance
+  model$Q[2, 2, 1] <- exp(pars[2]) # dummy_seas disturbace variance
+  diag(model$Q[-(1:2), -(1:2), 1]) <- exp(pars[3]) # trig_seas disturbances' variance
+  model$H[1, 1, 1] <- exp(pars[4]) # observation noise variance
+  model
+}
+```
+
+Fitting with h16...
+
+```{r}
+fit <- fitSSM(
+  mod,
+  log(c(vy/10, vy/100, vy/1000, vy/2)),
+  updt,
+  method = "BFGS"
+)
+```
+
+Convergence...
+
+```{r}
+fit$optim.out$convergence # convergence = 0 => fine
+exp(fit$optim.out$par) |> zapsmall() # estimated variance
+```
+Kalman Filter...
+
+```{r}
+kfs <- KFS(fit$model,
+           smoothing = c("state", "signal"))
+```
+
+Looking at effects...
+
+```{r}
+kfs$alphahat[, c("holiday", "summer_vacation", "holiday_friday", "holiday_saturday")] |> tail(1)
+```
+
+Trend level...
+
+```{r}
+smo_level <- xts(kfs$alphahat[, "level"], time(yna))
+plot(cbind(y = log(y+1), level = smo_level)["2018-01-01/"],
+     main = "time series and level")
+```
+
+Yearly seasonality...
+
+```{r}
+trig_names <- paste0("sea_trig", 1:15)
+smo_seas365 <- xts(rowSums(kfs$alphahat[, trig_names]), time(yna))
+
+(smo_seas365 + kfs$alphahat[, "holiday"] * dt_h16$holiday +
+  kfs$alphahat[, "summer_vacation"] * dt_h16$summer_vacation +
+    kfs$alphahat[, "holiday_friday"] * dt_h16$holiday_friday +
+  kfs$alphahat[, "holiday_saturday"] * dt_h16$holiday_saturday)[,1] |>
+  xts(order.by = as.Date(dt24$date)) |>
+  plot(main = "365-day seasonality with holiday effects", ylab = "value")
+```
+
+Weekly seasonality...
+
+```{r}
+smo_seas7 <- xts(kfs$alphahat[, "sea_dummy1"], dt24$date)
+plot(smo_seas7["2017-05-15/2017-05-21"], main = "weekly seasonality")
+```
+
+Predictions h16...
+
+```{r}
+signal <- xts(exp(kfs$muhat[,1])-1, dt24$date)
+plot(cbind(y, signal)["2019-12-01/2019-12-31"],
+     main = "actual and predicted")
+```
+
+Modelling and predicting all hours (test)...
+
+```{r}
+fits_ucm <- list()
+predictions_ucm <- list()
+
+for (h in 0:23){
+  hour_col <- paste0("h", h)
+  y <- xts(dt24_hday[hour_col], as.Date(dt24_hday$date))
+  yna <- log(y+1)
+  yna["2019-12-01/2019-12-31"] <- NA
+  dt_h <- dt24_hday[, c(hour_col, 'holiday', 'summer_vacation')]
+  dt_h$yna <- as.numeric(yna)
+  dt_h <- cbind(dt_h, holiday_friday = (wday(dt24$date)==6)*dt_h[, "holiday"] +
+                  (wday(dt24$date)==6)*dt_h[, "summer_vacation"] - 
+                  (wday(dt24$date)==6)*dt_h[, "holiday"] * (wday(dt24$date)==6)*dt_h[, "summer_vacation"],
+                holiday_saturday = (wday(dt24$date)==7)*dt_h[, "holiday"] +
+                  (wday(dt24$date)==7)*dt_h[, "summer_vacation"] - 
+                  (wday(dt24$date)==7)*dt_h[, "holiday"] * (wday(dt24$date)==7)*dt_h[, "summer_vacation"])
+  names(dt_h) <- c(hour_col, 'holiday', 'summer_vacation', 'yna', 'holiday_friday', 'holiday_saturday')
+  
+  mod <- SSModel(
+  yna ~ holiday + summer_vacation + holiday_friday +
+    holiday_saturday +
+    SSMtrend(1, NA) +
+    SSMseasonal(7, NA, "dummy") +
+    SSMseasonal(365, NA, "trig", harmonics = 1:15),
+  H = NA,
+  data = dt_h
+  )
+
+  
+  mod$a1["level", 1] <- mean(yna, na.rm = TRUE)
+  vy <- var(yna, na.rm = TRUE)
+  diag(mod$P1) <- vy
+  diag(mod$P1inf) <- 0
+  
+  fit <- fitSSM(
+    mod,
+    log(c(vy/10, vy/100, vy/1000, vy/2)),
+    updt,
+    method = "BFGS"
+  )
+  print('Convergence:')
+  print(fit$optim.out$convergence)
+  print(exp(fit$optim.out$par) |> zapsmall())
+  kfs <- KFS(fit$model,
+           smoothing = c("state", "signal"))
+  
+  signal <- xts(exp(kfs$muhat[,1])-1, dt24$date)
+  
+  fits_ucm[[hour_col]] <- fit
+  predictions_ucm[[hour_col]] <- signal
+}
+```
+Setting predictions...
+
+```{r}
+frcts_ucm <- tail(matrix(predictions_ucm[['h0']]),30)
+for (h in 1:23){
+  hour_col <- paste0("h", h)
+  frcts_ucm <- cbind(frcts_ucm, tail(matrix(predictions_ucm[[hour_col]]),30))
+}
+```
+
+Evaluating predictions plot...
+
+```{r}
+dt |>
+  tail(24*30) |>
+  mutate(forecast = as.numeric(t(frcts_ucm))) |>
+  pivot_longer(c(value, forecast), names_to = "series", values_to = "value") -> val_frcts_ucm
+val_frcts_ucm |>
+  ggplot(aes(x = datetime, y = value, color = series)) +
+  geom_line()
+```
+
+Evaluating predictions MAE...
+
+```{r}
+mae_ucm <- mean(abs(val_frcts_ucm[val_frcts_ucm$series == 'value', 'value'] -
+                  val_frcts_ucm[val_frcts_ucm$series == 'forecast', 'value'])$value)
+print(mae_ucm)
+```
+
+Setting for final predictions...
+
+```{r}
+dt24_pred |>
+  mutate(holiday = as.numeric(date %in% hdays_aus),
+         summer_vacation = as.numeric(((month(date) == 12)*(day(date)>=17) |
+                              ((month(date)) == 1)*(day(date)<= 31)))) ->
+  dt24_pred_hday
+dt24_full <- rbind(dt24_hday,dt24_pred_hday)
+```
+
+Modelling and predicting all hours (final)...
+
+```{r}
+fits_ucm <- list()
+predictions_ucm <- list()
+
+for (h in 0:23){
+  hour_col <- paste0("h", h)
+  y <- xts(dt24_full[hour_col], as.Date(dt24_full$date))
+  y <- log(y+1)
+  dt_h <- dt24_full[, c(hour_col, 'holiday', 'summer_vacation')]
+  dt_h$y <- as.numeric(y)
+  dt_h <- cbind(dt_h, holiday_friday = (wday(dt24_full$date)==6)*dt_h[, "holiday"] +
+                  (wday(dt24_full$date)==6)*dt_h[, "summer_vacation"] - 
+                  (wday(dt24_full$date)==6)*dt_h[, "holiday"] * (wday(dt24_full$date)==6)*dt_h[, "summer_vacation"],
+                holiday_saturday = (wday(dt24_full$date)==7)*dt_h[, "holiday"] +
+                  (wday(dt24_full$date)==7)*dt_h[, "summer_vacation"] - 
+                  (wday(dt24_full$date)==7)*dt_h[, "holiday"] * (wday(dt24_full$date)==7)*dt_h[, "summer_vacation"])
+  names(dt_h) <- c(hour_col, 'holiday', 'summer_vacation', 'y', 'holiday_friday', 'holiday_saturday')
+  
+  mod <- SSModel(
+  y ~ holiday + summer_vacation + holiday_friday +
+    holiday_saturday +
+    SSMtrend(1, NA) +
+    SSMseasonal(7, NA, "dummy") +
+    SSMseasonal(365, NA, "trig", harmonics = 1:15),
+  H = NA,
+  data = dt_h
+  )
+
+  
+  mod$a1["level", 1] <- mean(y, na.rm = TRUE)
+  vy <- var(y, na.rm = TRUE)
+  diag(mod$P1) <- vy
+  diag(mod$P1inf) <- 0
+  
+  fit <- fitSSM(
+    mod,
+    log(c(vy/10, vy/100, vy/1000, vy/2)),
+    updt,
+    method = "BFGS"
+  )
+  print('Convergence:')
+  print(fit$optim.out$convergence)
+  print(exp(fit$optim.out$par) |> zapsmall())
+  kfs <- KFS(fit$model,
+           smoothing = c("state", "signal"))
+  
+  signal <- xts(exp(kfs$muhat[,1])-1, dt24_full$date)
+  
+  fits_ucm[[hour_col]] <- fit
+  predictions_ucm[[hour_col]] <- signal
+}
+```
+
+Updating predictions_to_submit...
+
+```{r}
+frcts_ucm <- tail(matrix(predictions_ucm[['h0']]),60)
+for (h in 1:23){
+  hour_col <- paste0("h", h)
+  frcts_ucm <- cbind(frcts_ucm, tail(matrix(predictions_ucm[[hour_col]]),60))
+}
+
+dt_to_predict |>
+  tail(1440) |>
+  mutate(forecast = as.numeric(t(frcts_ucm))) |>
+  pivot_longer(c(value, forecast), names_to = "series", values_to = "value") ->  predictions_to_submit_ucm
+
+predictions_to_submit_ucm <- predictions_to_submit_ucm[!is.na(predictions_to_submit_ucm$value), c("datetime", "value")]
+
+predictions_to_submit <- cbind(predictions_to_submit, predictions_to_submit_ucm[, 'value'])
+names(predictions_to_submit) <- c('time', 'ARIMA', 'UCM')
+```
+
+
+# Machine Learning
+
+Preparing Dataset...
+
+```{r}
+library(gbm)
+wdt = dt |> mutate(value_24 = lag(value, 24),
+             value_168 = lag(value, 168),
+             value_365g = lag(value, 365*24),
+             yday = yday(date),
+             wday = wday(date)
+)
+
+wdt |>
+  mutate(holiday = as.numeric(date %in% hdays_aus),
+         summer_vacation = (as.numeric(((month(date) == 12)*(day(date)>=17) | ((month(date)) == 1)*(day(date)<= 31))))) ->
+  wdt
+
+train_ndx = 1:which(wdt$date == "2019-12-01")[1]-1
+eval_ndx = which(wdt$date >= "2019-12-01")
+wdt_orig <- wdt
+```
+
+Training (test)...
+
+```{r}
+gbm1 <- gbm(
+  value ~ .,
+  data = wdt[25:40584, -c(1,4)],
+  distribution = "tdist",
+  n.trees = 1000,
+  interaction.depth = 5,
+  bag.fraction = 0.7,
+  verbose = TRUE
+)
+```
+
+Evaluation test (plot)...
+
+```{r}
+frcts_ml <- matrix()
+i<-1
+for (idx in eval_ndx){
+  x_t <- wdt[idx,-c(1,4)]
+  x_t$value_24 <- wdt[idx-24,'value_24']
+  x_t$value_168 <- wdt[idx-168, 'value_168']
+  wdt$value_24[idx] <- x_t$value_24
+  wdt$value_168[idx] <- x_t$value_168
+  frcts_ml[i] <- pmax(predict(gbm1, x_t), 0)
+  wdt$value[idx] <- frcts_ml[i]
+  i <- i+1
+}
+cbind(frcts_ml,wdt_orig[eval_ndx,-1])[,c('datetime','frcts_ml','value')] |> pivot_longer(c(value, frcts_ml), names_to = "series", values_to = "value") |>
+ggplot(aes(x = datetime, y = value, color = series)) +
+  geom_line()
+```
+
+Evaluation test (MAE)...
+
+```{r}
+mae_ml <- mean(abs(tail(wdt_orig$value, 744)-frcts_ml))
+print(mae_ml)
+```
+
+Preparing dataset final...
+
+```{r}
+library(gbm)
+dt_full <- rbind(dt,dt_to_predict)
+wdt_full = dt_full |> mutate(value_24 = lag(value, 24),
+             value_168 = lag(value, 168),
+             value_365g = lag(value, 365*24),
+             yday = yday(date),
+             wday = wday(date)
+)
+
+wdt_full |>
+  mutate(holiday = as.numeric(date %in% hdays_aus),
+         summer_vacation = (as.numeric(((month(date) == 12)*(day(date)>=17) | ((month(date)) == 1)*(day(date)<= 31))))) ->
+  wdt_full
+
+wdt_full <- cbind(wdt_full, fri_sat = (wday(wdt_full$date)==6)+(wday(wdt_full$date)==7))
+
+wdt_full_orig <- wdt_full
+```
+
+Training final...
+
+```{r}
+gbm1 <- gbm(
+  value ~ .,
+  data = wdt[25:nrow(wdt_orig), -c(1,2,4)],
+  distribution = "tdist",
+  n.trees = 1000,
+  interaction.depth = 5,
+  bag.fraction = 0.7,
+  verbose = TRUE
+)
+```
+
+Predicting and updating predictions_to_submit...
+
+```{r}
+predictions_to_submit = predictions_to_submit[,c('time', 'ARIMA', 'UCM')]
+first <- nrow(wdt)+1
+last <- nrow(wdt_full_orig)
+frcts_ml_final <- matrix()
+i<-1
+for (idx in first:last){
+  x_t <- wdt_full[idx,-c(1,2,4)]
+  x_t$value_24 <- wdt_full[idx-24,'value_24']
+  x_t$value_168 <- wdt_full[idx-168, 'value_168']
+  wdt_full$value_24[idx] <- x_t$value_24
+  wdt_full$value_168[idx] <- x_t$value_168
+  frcts_ml_final[i] <- pmax(predict(gbm1, x_t), 0)
+  wdt_full$value[idx] <- frcts_ml_final[i]
+  i <- i+1
+}
+cbind(frcts_ml_final,wdt_full_orig[first:last,-1])[,c('datetime','frcts_ml_final','value')] |> pivot_longer(c(value, frcts_ml_final), names_to = "series", values_to = "value") -> predictions_to_submit_ml
+
+predictions_to_submit_ml <- predictions_to_submit_ml[!is.na(predictions_to_submit_ml$value), c("datetime", "value")]
+
+predictions_to_submit <- cbind(predictions_to_submit, predictions_to_submit_ml[, 'value'])
+names(predictions_to_submit) <- c('time', 'ARIMA', 'UCM', 'ML')
+```
+
+
+# Saving Results
+
+Creating .csv...
+
+```{r}
+predictions_to_submit_final <- predictions_to_submit[-nrow(predictions_to_submit),]
+predictions_to_submit_final$time <- format(predictions_to_submit_final$time, "%Y-%m-%d %H:%M:%S")
+write.csv(predictions_to_submit_final, "881765_20260211.csv", row.names = FALSE)
+```
+
+Final predictions summary...
+
+```{r}
+summary(predictions_to_submit_final)
+```
+
+
+Final check...
+
+```{r}
+predictions_to_submit_final <- read.csv("881765_20260211.csv")
+head(predictions_to_submit_final)
+tail(predictions_to_submit_final)
+```
+
